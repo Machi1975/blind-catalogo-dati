@@ -1,0 +1,50 @@
+# Svuota la cache di jsDelivr quando cambia il catalogo e controlla che il CDN serva il file nuovo.
+# La pagina https://store.blindgroup.net/catalogo-rapido carica catalogo-app.js e catalogo.json da jsDelivr (@main).
+# Installata da Claude il 21/10/2026 per la pubblicazione automatica del catalogo web; parte anche quando i file vengono caricati a mano.
+name: Aggiorna CDN jsDelivr
+on:
+  push:
+    branches: [main]
+    paths: ['catalogo.json', 'catalogo-app.js']
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: aggiorna-cdn
+  cancel-in-progress: false
+jobs:
+  cdn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Svuota la cache jsDelivr e verifica il catalogo servito
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ver() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("v",""))' "$1" 2>/dev/null || echo ""; }
+          curl -fsS --retry 5 --retry-delay 5 --retry-all-errors -o atteso.json "https://raw.githubusercontent.com/$REPO/$SHA/catalogo.json"
+          want=$(ver atteso.json)
+          echo "Catalogo nel commit ${SHA:0:7}: v=$want"
+          sleep 20
+          for i in $(seq 1 12); do
+            for f in catalogo.json catalogo-app.js; do
+              if curl -fsS --retry 2 -o purge.json "https://purge.jsdelivr.net/gh/$REPO@main/$f"; then
+                echo "purge $f: $(head -c 160 purge.json)"
+              else
+                echo "purge $f non riuscito, riprovo al giro dopo"
+              fi
+            done
+            sleep 25
+            rm -f servito.json
+            curl -fsS --retry 2 -o servito.json "https://cdn.jsdelivr.net/gh/$REPO@main/catalogo.json" || true
+            got=$(ver servito.json)
+            echo "Tentativo $i: jsDelivr serve v=$got"
+            if [ -n "$want" ] && [ "$got" = "$want" ]; then
+              echo "OK: jsDelivr serve il catalogo $want"
+              exit 0
+            fi
+          done
+          echo "ERRORE: dopo 12 tentativi jsDelivr non serve ancora il catalogo $want"
+          exit 1
