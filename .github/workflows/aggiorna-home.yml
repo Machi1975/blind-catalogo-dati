@@ -1,0 +1,61 @@
+# Rigenera i dati della home dello store (home.json e home-ricerca.json) ogni volta che cambia catalogo.json,
+# li carica nel repository e controlla che jsDelivr serva la versione nuova.
+# La home https://store.blindgroup.net/ (blocco «BLIND · Home v1.0») li legge da jsDelivr (@main).
+# Installata da Claude il 24/11/2026. Separata da aggiorna-cdn.yml, il cui esito viene letto dallo script del lunedi.
+# Il commit fatto qui con GITHUB_TOKEN non fa ripartire nessuna automazione.
+name: Aggiorna dati home
+on:
+  push:
+    branches: [main]
+    paths: ['catalogo.json', 'strumenti/build_home_dati.py']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: aggiorna-home
+  cancel-in-progress: false
+jobs:
+  home:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Genera home.json e home-ricerca.json da catalogo.json
+        run: python3 strumenti/build_home_dati.py catalogo.json .
+      - name: Carica i file se sono cambiati
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=$(python3 -c 'import json; print(json.load(open("home.json"))["v"])')
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add home.json home-ricerca.json
+          if git diff --cached --quiet; then echo "Dati home gia aggiornati (v=$v)"; exit 0; fi
+          git commit -m "Dati home $v (aggiornamento automatico)"
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "push rifiutato, riallineo e riprovo ($i)"; git pull --rebase; sleep 5
+          done
+          echo "ERRORE: push non riuscito"; exit 1
+      - name: Svuota la cache jsDelivr e verifica home.json
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ver() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("v",""))' "$1" 2>/dev/null || echo ""; }
+          want=$(ver home.json)
+          sleep 20
+          for i in $(seq 1 12); do
+            for f in home.json home-ricerca.json; do
+              curl -fsS --retry 2 -o purge.json "https://purge.jsdelivr.net/gh/$REPO@main/$f" && echo "purge $f: $(head -c 120 purge.json)" || echo "purge $f non riuscito"
+            done
+            sleep 25
+            rm -f servito.json
+            curl -fsS --retry 2 -o servito.json "https://cdn.jsdelivr.net/gh/$REPO@main/home.json" || true
+            got=$(ver servito.json)
+            echo "Tentativo $i: jsDelivr serve home.json v=$got"
+            if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "OK: jsDelivr serve i dati home $want"; exit 0; fi
+          done
+          echo "ERRORE: dopo 12 tentativi jsDelivr non serve ancora home.json $want"
+          exit 1
